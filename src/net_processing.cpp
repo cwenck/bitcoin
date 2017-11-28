@@ -989,7 +989,7 @@ void RelayTransactionDandelion(const CTransaction& tx, CConnman& connman, NodeId
         return;
     }
 
-    
+
 
     // Does this transaction depend on any embargoed transactions?
     BOOST_FOREACH(const CTxIn& txin, tx.vin) {
@@ -1016,7 +1016,7 @@ void RelayTransactionDandelion(const CTransaction& tx, CConnman& connman, NodeId
         nStemId = vStemNodesExceptSender[GetRand(vStemNodesExceptSender.size())];
 
         int64_t nNow = GetTimeMicros();
-        int64_t embargoTime = PoissonNextSend(nNow, EMBARGO_MEAN_DELAY) + EMBARGO_FIXED_DELAY * 1000000; 
+        int64_t embargoTime = PoissonNextSend(nNow, EMBARGO_MEAN_DELAY) + EMBARGO_FIXED_DELAY * 1000000;
         embargoTime = std::max(embargoTime, parentEmbargoTime+1);
         auto it = mapEmbargoExpire.insert(std::make_pair(embargoTime, hash));
         CDandelionEmbargo emb = { it, nStemId };
@@ -1059,7 +1059,7 @@ void RelayTransactionDandelion(const CTransaction& tx, CConnman& connman, NodeId
                 LogPrint(BCLog::NET, "dandelion: relayed as regular inv, tx=%s\n", hash.ToString());
                 RelayTransaction(tx, connman);
                 return;
-//                vInv.push_back(CInv(MSG_TX, hash));    
+//                vInv.push_back(CInv(MSG_TX, hash));
             }
             LogPrint(BCLog::NET, "dandelion: Adding to map relay tx=%s\n", inv.hash.ToString());
             {
@@ -1753,6 +1753,15 @@ bool static ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStr
                 // Skip adding to inventory for dandelion tx
                 if (inv.type == MSG_TX || inv.type == MSG_WITNESS_TX)
                     pfrom->AddInventoryKnown(inv);
+
+                /*
+                TODO - add data structure to store dandelion transactions
+                else if (inv.type == MSG_DANDELION_TX || inv.type == MSG_WITNESS_DANDELION_TX)
+                {
+                    pfrom -> add to peer structure that we have seen a dandelion transaction from this peer
+                }
+                */
+
                 if (fBlocksOnly) {
                     LogPrint(BCLog::NET, "transaction (%s) inv sent in violation of protocol peer=%d\n", inv.hash.ToString(), pfrom->GetId());
                 } else if (!fImporting && !fReindex && !IsInitialBlockDownload()) {
@@ -1987,6 +1996,13 @@ bool static ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStr
 
 
         if (!fIsDandelion) pfrom->AddInventoryKnown(inv);
+        /*
+        TODO - add data structure to store dandelion transactions
+        else
+        {
+            pfrom -> add to peer structure that we have seen a dandelion transaction from this peer
+        }
+        */
 
         LOCK(cs_main);
 
@@ -2006,9 +2022,10 @@ bool static ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStr
             LogPrint(BCLog::NET, "dandelion tx leaving embargo: %s peer=%d\n", inv.hash.ToString(), pfrom->GetId());
             RelayTransaction(tx, connman);
         }
-        else if (!AlreadyHave(inv) && AcceptToMemoryPool(mempool, state, ptx, true, &fMissingInputs, &lRemovedTxn)) {
+        else if (!AlreadyHave(inv) && AcceptToMemoryPool(mempool, state, ptx, true, &fMissingInputs, &lRemovedTxn, fIsDandelion)) {
             mempool.check(pcoinsTip);
             if (fIsDandelion)
+                // TODO - add dandelion transactions to alt data structure to keep track of transactions
                 RelayTransactionDandelion(tx, connman, pfrom->GetId());
             else
                 RelayTransaction(tx, connman);
@@ -2047,10 +2064,12 @@ bool static ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStr
 
                     if (setMisbehaving.count(fromPeer))
                         continue;
-                    if (AcceptToMemoryPool(mempool, stateDummy, porphanTx, true, &fMissingInputs2, &lRemovedTxn)) {
+
+                    bool fOrphanEmbargo = (mapEmbargo.find(orphanHash) != mapEmbargo.end());
+                    if (AcceptToMemoryPool(mempool, stateDummy, porphanTx, true, &fMissingInputs2, &lRemovedTxn, fOrphanEmbargo)) {
                         LogPrint(BCLog::MEMPOOL, "   accepted orphan tx %s\n", orphanHash.ToString());
-                        bool fOrphanEmbargo = (mapEmbargo.find(orphanHash) != mapEmbargo.end());
                         if (fOrphanEmbargo) {
+                            // TODO - add dandelion transactions to alt data structure to keep track of transactions
                             assert(mapEmbargo.find(orphanHash)->second.itExpire == mapEmbargoExpire.end());
                             mapEmbargo.erase(orphanHash);
                             RelayTransactionDandelion(orphanTx, connman, fromPeer);
@@ -2922,7 +2941,7 @@ bool ProcessMessages(CNode* pfrom, CConnman& connman, const std::atomic<bool>& i
         return fMoreWork;
     }
     std::string strCommand = hdr.GetCommand();
-    
+
 
     // Message size
     unsigned int nMessageSize = hdr.nMessageSize;
@@ -3298,7 +3317,7 @@ bool SendMessages(CNode* pto, CConnman& connman, const std::atomic<bool>& interr
             if (vStemNodes.empty()) {
                 nNextDandelionReassign = nNow + 1 * 60 * 1000000;
             }
-                
+
         }
 
         //
@@ -3413,7 +3432,7 @@ bool SendMessages(CNode* pto, CConnman& connman, const std::atomic<bool>& interr
                     std::set<uint256>::iterator it = vInvTx.back();
                     vInvTx.pop_back();
                     uint256 hash = *it;
-                    LogPrint(BCLog::NET, "tx=%s being added to maprelay\n", hash.ToString()); 
+                    LogPrint(BCLog::NET, "tx=%s being added to maprelay\n", hash.ToString());
                     // Remove it from the to-be-sent set
                     pto->setInventoryTxToSend.erase(it);
                     // Check if not in the filter already
