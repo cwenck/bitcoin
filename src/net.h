@@ -95,6 +95,11 @@ static const ServiceFlags REQUIRED_SERVICES = NODE_NETWORK;
 // NOTE: When adjusting this, update rpcnet:setban's help ("24h")
 static const unsigned int DEFAULT_MISBEHAVING_BANTIME = 60 * 60 * 24;  // Default 24-hour ban
 
+/** Fixed delay for Dandelion embargo in seconds */
+static const int64_t EMBARGO_FIXED_DELAY = 10;
+/** Mean delay for Dandelion embargo in seconds, after the fixed delay */
+static const int64_t EMBARGO_MEAN_DELAY = 30;
+
 typedef int64_t NodeId;
 
 struct AddedNodeInfo
@@ -643,8 +648,29 @@ public:
     // Set of transaction ids we still have to announce.
     // They are sorted by the mempool before relay, so the order is not important.
     std::set<uint256> setInventoryTxToSend;
-    // dandelion relay
-    std::set<uint256> setStemTx;
+
+    // Dandelion stem handling
+    // Protected by cs_inventory
+    typedef std::multimap<int64_t, uint256> MapEmbargo;
+    MapEmbargo mapEmbargoExpire;
+    // mapEmbargoExpire maps the times transactions expire to the transactions that expire at that time.
+    struct CDandelionEmbargo {
+        // The iterator for the corresponding entry in mapEmbargoExpire
+        MapEmbargo::iterator itExpire;
+
+        // Stem nodes that the transaction was relayed to (-1 if not sent yet)
+        // Used to know the nodes whose GetData requests should be responded to.
+        std::set<NodeId> stemId;
+    };
+    std::map<uint256, CDandelionEmbargo> mapEmbargo;
+    // Invariant: if tx is in mapEmbargo, then either
+    //   - tx is in mapOrphanTransactions, or
+    //   - tx.itExpire != mapEmbargoExpire.end()
+    NodeId nCurrStemNode;
+    // nCurrStemNode is the current stem to forward dandelion transactions to that
+    // were sent by this node. If nCurrStemNode is changed all transactions still in
+    // mapEmbargo MUST be resent along the new stem.
+
     // List of block ids we still have announce.
     // There is no final sorting before sending, as they are always sent immediately
     // and in the order requested.
@@ -773,6 +799,30 @@ public:
         }
     }
 
+    /**
+     * Check if a transaction is in the node's embargo map.
+     *
+     * @param[in]   hash        Transaction hash to check
+     * @return                  True if the transaction is embargoed
+     */
+    bool DandelionTxIsEmbargoed(uint256 hash);
+
+    /**
+     * Lift the embargo on transactions that are embargoed past their embargo time.
+     *
+     * @return          Vector of transaction hashes for transactions that had their embargo lifted.
+     *                  Those transactions should be relayed to all nodes normally
+     */
+    std::vector<uint256> DandelionTxLiftEmbargo();
+
+    /**
+     * Embargo a dandelion transaction if necessary before attempting to relay it.
+     *
+     * @param[in]   tx          Dandelion transaction to potentially embargo
+     * @return                  Id of the node to relay the transaction to if it is going to remain in the stem phase,
+     *                          or -1 if it should be relayed normally via the fluff phase
+     */
+    NodeId EmbargoDandelionTx(const CTransaction& tx);
 
     void AddInventoryKnown(const CInv& inv)
     {

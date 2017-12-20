@@ -2719,6 +2719,90 @@ CNode::~CNode()
         delete pfilter;
 }
 
+bool DandelionTxIsEmbargoed(uint256 hash)
+{
+    LOCK(cs_inventory);
+    auto itEmbargo = mapEmbargo.find(hash);
+    return itEmbargo != mapEmbargo.end();
+}
+
+std::vector<uint256> CNode::DandelionTxLiftEmbargo()
+{
+    LOCK(cs_inventory);
+
+    // Lifting Dandelion transaction embargo
+    // TODO - remove from SendMessages() in net_processing.cpp
+
+    std::vector<uint256> liftedTxHashes;
+    while (!mapEmbargoExpire.empty() && mapEmbargoExpire.begin()->first < nNow)
+    {
+        uint256 hash = mapEmbargoExpire.begin()->second;
+        liftedTxHashes.push_back(hash);
+        LogPrint(BCLog::NET, "[dandelion] embargo expiring on %s\n", hash.ToString());
+
+        mapEmbargo.erase(hash);
+        mapEmbargoExpire.erase(mapEmbargoExpire.begin());
+    }
+
+    return liftedTxHashes
+}
+
+NodeId CNode::EmbargoDandelionTx(const CTransaction& tx)
+{
+    uint256 hash = tx.GetHash();
+    bool fEmbargoedParent = false;
+    bool fCoinflip = false;
+
+    LOCK(cs_inventory);
+
+    // Does this transaction depend on any embargoed transactions?
+    BOOST_FOREACH(const CTxIn& txin, tx.vin) {
+        auto itEmbargo = mapEmbargo.find(txin.prevout.hash);
+        if (itEmbargo != mapEmbargo.end())
+        {
+            LogPrint(BCLog::NET, "[dandelion] parent of %s was embargoed (NodeId=%d): %s\n", hash.ToString(),
+                     id, txin.prevout.hash.ToString());
+            fEmbargoedParent = true;
+            if (itEmbargo->second.itExpire != mapEmbargoExpire.end())
+            {
+                parentEmbargoTime = std::max(parentEmbargoTime+1, itEmbargo->second.itExpire->first);
+            }
+            else
+            {
+                LogPrint(BCLog::NET, "[dandelion] assertion failed: no embargo time for parent %s\n", txin.prevout.hash.ToString());
+            }
+        }
+    }
+
+    if (!fEmbargoedParent)
+    {
+        int64_t dand_prob = GetArg("-dandelion", DEFAULT_DANDELION_PROB_PCT);
+        fCoinflip = ((int64_t) GetRand(100)) < dand_prob;
+        LogPrint(BCLog::NET, "[dandelion] coin flip was %s for transaction hash=%s\n", fCoinflip,
+                 hash.ToString());
+    }
+
+    // Check if the transaction needs to be embargoed and should continue in the stem phase
+    if (fEmbargoedParent || fCoinflip)
+    {
+        int64_t nNow = GetTimeMicros();
+        int64_t embargoTime = PoissonNextSend(nNow, EMBARGO_MEAN_DELAY) + EMBARGO_FIXED_DELAY * 1000000;
+        embargoTime = std::max(embargoTime, parentEmbargoTime+1);
+        auto it = mapEmbargoExpire.insert(std::make_pair(embargoTime, hash));
+
+        std::set<NodeId> stemIds;
+        stemIds.insert(nCurrStemNode);
+
+        CDandelionEmbargo emb = { it, stemIds };
+        LogPrint(BCLog::NET, "[dandelion] tx embargoed (NodeId=%d): tx=%s,time=%d\n", id, hash.ToString(), embargoTime);
+        mapEmbargo.insert(std::make_pair(hash, emb));
+
+        return nCurrStemNode;
+    }
+
+    return -1;
+}
+
 void CNode::AskFor(const CInv& inv)
 {
     if (mapAskFor.size() > MAPASKFOR_MAX_SZ || setAskFor.size() > SETASKFOR_MAX_SZ)
