@@ -670,7 +670,6 @@ void EraseOrphansFor(NodeId peer)
         if (maybeErase->second.fromPeer == peer)
         {
             nErased += EraseOrphanTx(maybeErase->second.tx->GetHash());
-            mapEmbargo.erase(maybeErase->second.tx->GetHash());
         }
     }
     if (nErased > 0) LogPrint(BCLog::MEMPOOL, "Erased %d orphan tx from peer=%d\n", nErased, peer);
@@ -692,7 +691,6 @@ unsigned int LimitOrphanTxSize(unsigned int nMaxOrphans) EXCLUSIVE_LOCKS_REQUIRE
             std::map<uint256, COrphanTx>::iterator maybeErase = iter++;
             if (maybeErase->second.nTimeExpire <= nNow) {
                 nErased += EraseOrphanTx(maybeErase->second.tx->GetHash());
-                mapEmbargo.erase(maybeErase->second.tx->GetHash());
             } else {
                 nMinExpTime = std::min(maybeErase->second.nTimeExpire, nMinExpTime);
             }
@@ -709,7 +707,6 @@ unsigned int LimitOrphanTxSize(unsigned int nMaxOrphans) EXCLUSIVE_LOCKS_REQUIRE
         if (it == mapOrphanTransactions.end())
             it = mapOrphanTransactions.begin();
         EraseOrphanTx(it->first);
-        mapEmbargo.erase(it->first);
         ++nEvicted;
     }
     return nEvicted;
@@ -777,7 +774,6 @@ void PeerLogicValidation::BlockConnected(const std::shared_ptr<const CBlock>& pb
         int nErased = 0;
         BOOST_FOREACH(uint256 &orphanHash, vOrphanErase) {
             nErased += EraseOrphanTx(orphanHash);
-            mapEmbargo.erase(orphanHash);
         }
         LogPrint(BCLog::MEMPOOL, "Erased %d orphan tx included or conflicted by block\n", nErased);
     }
@@ -939,45 +935,47 @@ static void RelayTransaction(const CTransaction& tx, CConnman& connman)
 {
     CInv inv(MSG_TX, tx.GetHash());
     LogPrint(BCLog::NET, "Relaying tx %s\n", inv.hash.ToString());
-    {
-        // Clear any dandelion embargo information
-        LOCK(cs_main);
-        auto it = mapEmbargo.find(inv.hash);
-        if (it != mapEmbargo.end()) {
-            if (it->second.itExpire != mapEmbargoExpire.end())
-                mapEmbargoExpire.erase(it->second.itExpire);
-            mapEmbargo.erase(it);
-        }
-        // TODO: also erase from the CNode peer
-    }
+
     connman.ForEachNode([&inv](CNode* pnode)
     {
+        // Before relaying the transaction make sure it gets removed from any embargo maps
+        pnode->DandelionTxRemoveEmbargo(inv.hash);
         pnode->PushInventory(inv);
     });
 }
 
-void RelayTransactionDandelion(const CTransaction& tx, CConnman& connman, CNode* pfrom)
+
+static void RelayTransactionDandelion(const CTransaction& tx, CConnman& connman, CNode* pfrom)
 {
-    // TODO - WIP implementation to handle per incomming edge
+    // Get the id of the node to forward the transaction to and perform necessary setup
+    NodeId nStemId = pfrom->DandelionTxSetupRelay(tx);
 
-    NodeId nStemId = pfrom->EmbargoDandelionTx(tx);
-
-    if (nStemId == -1) {
+    if (nStemId == -1)
+    {
+        // Node should not be embargoed
         RelayTransaction(tx, connman);
         return;
     }
 
+    // Get the node with the correct node ID to actually relay the transaction to.
     CNode* pto = NULL;
-    connman.ForEachNode([&pto, &fRelayed, nStemId](CNode* pnode)
-        {
-            if (pnode->GetId() == nStemId) {
-                pto = pnode;
-            }
+    connman.ForEachNode([&pto, nStemId](CNode* pnode)
+    {
+        if (pnode->GetId() == nStemId) {
+            pto = pnode;
         }
-    );
+    });
 
     if (pto)
     {
+        uint256 hash = tx.GetHash();
+
+        if (pto->GetId() == pfrom->GetId())
+        {
+            // TODO - what is the expected behavior here? Check to see if this case is even possible.
+            LogPrint(BCLog::NET, "[dandelion] tx=%s has same from and to nodes nodeId=%d\n", hash.ToString(), pfrom->GetId());
+        }
+
         std::vector<CInv> vInv;
         vInv.reserve(1);
         const CNetMsgMaker msgMaker(pto->GetSendVersion());
@@ -989,7 +987,8 @@ void RelayTransactionDandelion(const CTransaction& tx, CConnman& connman, CNode*
             filterrate = pto->minFeeFilter;
         }
 
-        // TODO - Should this line be here?
+        // TODO - Should this case be here? Do we want to skip sending a transaction if this node
+        // knows that another node already has received a non-dandelion version the transaction
         if (pto->filterInventoryKnown.contains(hash)) return;
 
         auto txinfo = mempool.info(hash);
@@ -1008,7 +1007,7 @@ void RelayTransactionDandelion(const CTransaction& tx, CConnman& connman, CNode*
                 LogPrint(BCLog::NET, "[dandelion] not inserted into map relay, tx=%s\n", hash.ToString());
 
 
-            // Send the transaction
+            // Send the transaction along the stem
             connman.PushMessage(pto, msgMaker.Make(NetMsgType::INV, vInv));
             vInv.clear();
 
@@ -1215,15 +1214,35 @@ void static ProcessGetData(CNode* pfrom, const Consensus::Params& consensusParam
                 // to this peer, or if embargo ended
                 auto mi = mapRelay.find(inv.hash);
                 int nSendFlags = ((inv.type == MSG_TX || inv.type == MSG_DANDELION_TX) ? SERIALIZE_TRANSACTION_NO_WITNESS : 0);
-                auto embargo = mapEmbargo.find(inv.hash);
-                bool fEmbargoed = embargo != mapEmbargo.end();
+
+                // fValidStem Will be set to true if the transaction hash corresponds to embargoed dandelion
+                // transaction a pfrom is a stem node the transaction was actaully relayed to.
+
+                // INVARIANT: If fValidStem is true then fEmbargoed MUST also be true
+                bool fEmbargoed = false;
+                bool fValidStem = false;
+
+                connman.ForEachNode([&pfrom, &fEmbargoed, &fValidStem, &inv](CNode* pnode)
+                {
+                    // For both booleans they should be set to true if any node returns true for the corresponding functions
+
+                    bool isEmbargoed = pnode->DandelionTxIsEmbargoed(inv.hash);
+                    if (isEmbargoed) fEmbargoed = true;
+
+                    bool isValidStem = pnode->DandelionVerifyStemNode(inv.hash, pfrom->GetId());
+                    if (isValidStem) fValidStem = true;
+                });
+
                 if (mi != mapRelay.end()) {
+                    // Transaction is in the mapRelay so get its information from mapRelay to send
                     push = true;
                     if (!fEmbargoed) {
+                        // GetData for standard transaction that is not under embargo
                         LogPrint(BCLog::NET, "tx=%s relayed as tx\n", inv.hash.ToString());
                         connman.PushMessage(pfrom, msgMaker.Make(nSendFlags, NetMsgType::TX, *mi->second));
                     }
-                    else if (pfrom->GetId() == embargo->second.stemId) {
+                    else if (fValidStem) {
+                        // GetData for Dandelion transaction by a valid stem node
                         LogPrint(BCLog::NET, "tx=%s relayed as dandelion_tx\n", inv.hash.ToString());
                         connman.PushMessage(pfrom, msgMaker.Make(nSendFlags, pfrom->isDandelion() ? NetMsgType::DANDELIONTX : NetMsgType::TX, *mi->second));
                     }
@@ -1692,8 +1711,7 @@ bool static ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStr
             else
             {
                 // Skip adding to inventory for dandelion tx
-                if (inv.type == MSG_TX || inv.type == MSG_WITNESS_TX)
-                    pfrom->AddInventoryKnown(inv);
+                if (inv.type == MSG_TX || inv.type == MSG_WITNESS_TX) pfrom->AddInventoryKnown(inv);
 
                 /*
                 TODO - add data structure to store dandelion transactions
