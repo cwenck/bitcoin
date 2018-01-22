@@ -655,13 +655,18 @@ public:
     MapEmbargo mapEmbargoExpire;
     // mapEmbargoExpire maps the times transactions expire to the transactions that expire at that time.
     struct CDandelionEmbargo {
-        // The iterator for the corresponding entry in mapEmbargoExpire
+        // The iterator for the corresponding entry in mapEmbargoExpire.
         MapEmbargo::iterator itExpire;
 
         // Stem nodes that the transaction was relayed to. Empty set if not relayed yet.
         // Used to know the nodes whose GetData requests should be responded to.
         std::set<NodeId> setStemRelays;
     };
+
+    // Store of dandelion transaction while they are in embargo.
+    // INVARIANT: only transactions currently embargoed are in mapDandelionRelay
+    // Protected by cs_inventory
+    std::map<uint256, CTransactionRef> mapDandelionRelay;
 
     // Invariant: if tx is in mapEmbargo, then either
     //   - tx is in mapOrphanTransactions, or
@@ -850,6 +855,20 @@ public:
      *                          relayed to the stem node at some point.
      */
     bool DandelionVerifyStemNode(uint256 hash, NodeId stemId);
+
+    /**
+     * Add a transaction to dandelion map relay.
+     *
+     * @param tx                Transaction to add.
+     */
+    void AddDandelionTxToRelay(const CTransactionRef& tx);
+
+    /**
+     * Add a transaction to dandelion map relay.
+     *
+     * @param tx                Transaction to remove.
+     */
+    void RemoveDandelionTxFromRelay(uint256 hash);
 
     /**
      * Updates the current stem node that dandelion transactions sent from this node should be forwarded to.

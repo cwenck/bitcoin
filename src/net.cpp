@@ -2742,6 +2742,7 @@ std::vector<uint256> CNode::DandelionTxLiftEmbargo()
         liftedTxHashes.push_back(hash);
         LogPrint(BCLog::NET, "[dandelion] embargo expiring for tx=%s\n", hash.ToString());
 
+        RemoveDandelionTxFromRelay(hash);
         mapEmbargo.erase(hash);
         mapEmbargoExpire.erase(mapEmbargoExpire.begin());
     }
@@ -2753,10 +2754,21 @@ void CNode::DandelionTxRemoveEmbargo(uint256 hash)
 {
     LOCK(cs_inventory);
 
+    RemoveDandelionTxFromRelay(hash);
+
+    auto itRelay = mapDandelionRelay.find(hash);
+    if (itRelay != mapDandelionRelay.find(hash))
+    {
+        mapDandelionRelay.erase(itRelay);
+    }
+
     auto it = mapEmbargo.find(hash);
-    if (it != mapEmbargo.end()) {
+    if (it != mapEmbargo.end())
+    {
         if (it->second.itExpire != mapEmbargoExpire.end())
+        {
             mapEmbargoExpire.erase(it->second.itExpire);
+        }
         mapEmbargo.erase(it);
 
         LogPrint(BCLog::NET, "[dandelion] embargo removed for tx=%s\n", hash.ToString());
@@ -2839,6 +2851,28 @@ bool CNode::DandelionVerifyStemNode(uint256 hash, NodeId stemId)
     }
 
     return false;
+}
+
+void AddDandelionTxToRelay(const CTransactionRef& tx)
+{
+    LOCK(cs_inventory);
+    auto ret = mapDandelionRelay.insert(std::make_pair(tx.GetHash(), std::move(tx)));
+
+    if (ret.second)
+        LogPrint(BCLog::NET, "[dandelion] inserted into map relay, tx=%s\n", hash.ToString());
+    else
+        LogPrint(BCLog::NET, "[dandelion] not inserted into map relay, tx=%s\n", hash.ToString());
+}
+
+void RemoveDandelionTxFromRelay(uint256 hash);
+{
+    LOCK(cs_inventory);
+    auto it = mapDandelionRelay.find(hash);
+
+    if (it != mapDandelionRelay.end())
+    {
+        mapDandelionRelay.erase(it);
+    }
 }
 
 std::vector<uint256> CNode::UpdateStem(NodeId stemId)
