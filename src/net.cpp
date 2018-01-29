@@ -2853,10 +2853,12 @@ bool CNode::DandelionVerifyStemNode(uint256 hash, NodeId stemId)
     return false;
 }
 
-void AddDandelionTxToRelay(const CTransactionRef& tx)
+void CNode::AddDandelionTxToRelay(const CTransaction& tx)
 {
+    uint256 hash = tx.GetHash();
+
     LOCK(cs_inventory);
-    auto ret = mapDandelionRelay.insert(std::make_pair(tx.GetHash(), std::move(tx)));
+    auto ret = mapDandelionRelay.insert(std::make_pair(hash, std::move(tx)));
 
     if (ret.second)
         LogPrint(BCLog::NET, "[dandelion] inserted into map relay, tx=%s\n", hash.ToString());
@@ -2864,7 +2866,7 @@ void AddDandelionTxToRelay(const CTransactionRef& tx)
         LogPrint(BCLog::NET, "[dandelion] not inserted into map relay, tx=%s\n", hash.ToString());
 }
 
-void RemoveDandelionTxFromRelay(uint256 hash);
+void CNode::RemoveDandelionTxFromRelay(uint256 hash)
 {
     LOCK(cs_inventory);
     auto it = mapDandelionRelay.find(hash);
@@ -3009,4 +3011,4 @@ uint64_t CConnman::CalculateKeyedNetGroup(const CAddress& ad) const
     return GetDeterministicRandomizer(RANDOMIZER_ID_NETGROUP).Write(&vchNetGroup[0], vchNetGroup.size()).Finalize();
 }
 
-extern void RelayTransactionDandelion(const CTransaction& tx, CConnman* connman);
+extern void RelayTransactionDandelion(const CTransaction& tx, CConnman& connman, CNode* pfrom);

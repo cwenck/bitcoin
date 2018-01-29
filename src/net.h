@@ -16,6 +16,7 @@
 #include "netaddress.h"
 #include "policy/feerate.h"
 #include "protocol.h"
+#include "primitives/transaction.h"
 #include "random.h"
 #include "streams.h"
 #include "sync.h"
@@ -666,7 +667,7 @@ public:
     // Store of dandelion transaction while they are in embargo.
     // INVARIANT: only transactions currently embargoed are in mapDandelionRelay
     // Protected by cs_inventory
-    std::map<uint256, CTransactionRef> mapDandelionRelay;
+    std::map<uint256, CTransaction> mapDandelionRelay;
 
     // Invariant: if tx is in mapEmbargo, then either
     //   - tx is in mapOrphanTransactions, or
@@ -861,7 +862,7 @@ public:
      *
      * @param tx                Transaction to add.
      */
-    void AddDandelionTxToRelay(const CTransactionRef& tx);
+    void AddDandelionTxToRelay(const CTransaction& tx);
 
     /**
      * Add a transaction to dandelion map relay.
@@ -933,6 +934,6 @@ public:
 /** Return a timestamp in the future (in microseconds) for exponentially distributed events. */
 int64_t PoissonNextSend(int64_t nNow, int average_interval_seconds);
 
-void RelayTransactionDandelion(const CTransaction& tx, CConnman& connman, NodeId from);
+void RelayTransactionDandelion(const CTransaction& tx, CConnman& connman, CNode* pfrom);
 
 #endif // BITCOIN_NET_H
