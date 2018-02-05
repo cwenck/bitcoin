@@ -1236,6 +1236,9 @@ void static ProcessGetData(CNode* pfrom, const Consensus::Params& consensusParam
 
                     // GetData for Dandelion transaction by a valid stem node
                     LogPrint(BCLog::NET, "tx=%s relayed as dandelion_tx\n", inv.hash.ToString());
+
+                    // TODO - get proper transaction data from mapDandelionRelay in CNode (net.h/net.cpp)
+                    // the parameter *mi->second will not work since the transaciton details will not be in mapRelay for Dandelion Transactions
                     connman.PushMessage(pfrom, msgMaker.Make(nSendFlags, pfrom->isDandelion() ? NetMsgType::DANDELIONTX : NetMsgType::TX, *mi->second));
                 }
                 else if (!fEmbargoed && pfrom->timeLastMempoolReq)
@@ -1709,7 +1712,9 @@ bool static ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStr
                 if (inv.type == MSG_TX || inv.type == MSG_WITNESS_TX) pfrom->AddInventoryKnown(inv);
 
                 /*
-                TODO - add data structure to store dandelion transactions
+                NEW NOTE: My current thinking is that this TODO is NOT needed, but look through the code and check yourself. I may be wrong.
+                MAYBE TODO - add data structure to store dandelion transactions
+
                 else if (inv.type == MSG_DANDELION_TX || inv.type == MSG_WITNESS_DANDELION_TX)
                 {
                     pfrom -> add to peer structure that we have seen a dandelion transaction from this peer
@@ -1726,9 +1731,9 @@ bool static ProcessMessage(CNode* pfrom, const std::string& strCommand, CDataStr
                     //
 
                     // bool fEmbargoed = mapEmbargo.find(inv.hash) != mapEmbargo.end();
-                    // if (!fAlreadyHave || fEmbargoed) {
-                    //     pfrom->AskFor(inv);
-                    // }
+                    if (!fAlreadyHave /*|| fEmbargoed */) {
+                        pfrom->AskFor(inv);
+                    }
                 }
             }
 

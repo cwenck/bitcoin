@@ -865,7 +865,7 @@ public:
     void AddDandelionTxToRelay(const CTransaction& tx);
 
     /**
-     * Add a transaction to dandelion map relay.
+     * Remove a transaction from the dandelion map relay.
      *
      * @param tx                Transaction to remove.
      */
